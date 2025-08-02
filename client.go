@@ -2,7 +2,6 @@ package gadb
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -221,10 +220,18 @@ func (c Client) executeCommand(command string, onlyVerifyResponse ...bool) (resp
 	return
 }
 
-// 添加错误定义
-var ErrListenerClosed = errors.New("listener closed")
+// DeviceEvent 表示设备状态变化事件
+type DeviceEvent struct {
+	Present bool   // 设备是否出现（true=连接，false=断开）
+	Serial  string // 设备序列号
+	Status  string // 设备状态（"device", "offline", "unauthorized", "absent"等）
+}
 
-func (c Client) Listen() (next func() ([]Device, error), cancel func() error, err error) {
+// TrackDevices 开始跟踪设备状态变化
+// 返回事件通道和取消函数：
+//   - events: 接收设备状态变化事件的通道
+//   - cancel: 调用后停止跟踪并关闭连接
+func (c Client) TrackDevices() (events <-chan DeviceEvent, cancel func() error, err error) {
 	tp, err := c.createTransport()
 	if err != nil {
 		return nil, nil, err
@@ -240,75 +247,78 @@ func (c Client) Listen() (next func() ([]Device, error), cancel func() error, er
 		return nil, nil, err
 	}
 
-	// 使用context处理取消
+	// 创建事件通道和取消上下文
+	eventCh := make(chan DeviceEvent)
 	ctx, cancelCtx := context.WithCancel(context.Background())
 	var closeOnce sync.Once
 
-	// next函数：支持上下文取消的阻塞读取
-	nextFn := func() ([]Device, error) {
-		// 创建响应通道
-		resultCh := make(chan struct {
-			devices []Device
-			err     error
-		}, 1)
+	// 存储上一次的设备状态（serial -> status）
+	prevDevices := make(map[string]string)
 
-		// 在goroutine中执行阻塞读取
-		go func() {
-			resp, err := tp.UnpackString()
-			if err != nil {
-				resultCh <- struct {
-					devices []Device
-					err     error
-				}{nil, err}
+	// 启动监听goroutine
+	go func() {
+		defer close(eventCh)
+		defer closeOnce.Do(func() { _ = tp.Close() })
+
+		for {
+			select {
+			case <-ctx.Done():
 				return
-			}
-
-			// 解析设备列表
-			lines := strings.Split(resp, "\n")
-			devices := make([]Device, 0, len(lines))
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				if line == "" {
-					continue
+			default:
+				// 读取设备状态更新
+				resp, err := tp.UnpackString()
+				if err != nil {
+					// 连接关闭或错误，退出goroutine
+					return
 				}
 
-				fields := strings.Fields(line)
-				if len(fields) < 4 || fields[0] == "" {
-					debugLog(fmt.Sprintf("listen: can't parse '%s'", line))
-					continue
-				}
-
-				// 解析设备属性
-				attrs := make(map[string]string)
-				for _, attr := range fields[2:] {
-					parts := strings.SplitN(attr, ":", 2)
-					if len(parts) < 2 {
+				// 解析当前设备状态
+				currDevices := make(map[string]string)
+				for _, line := range strings.Split(resp, "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
 						continue
 					}
-					attrs[parts[0]] = parts[1]
+
+					fields := strings.Fields(line)
+					if len(fields) < 2 {
+						continue
+					}
+					serial := fields[0]
+					status := fields[1]
+					currDevices[serial] = status
 				}
-				devices = append(devices, Device{
-					adbClient: c,
-					serial:    fields[0],
-					attrs:     attrs,
-				})
+
+				// 检测设备消失
+				for serial := range prevDevices {
+					if _, exists := currDevices[serial]; !exists {
+						eventCh <- DeviceEvent{
+							Present: false,
+							Serial:  serial,
+							Status:  "absent",
+						}
+					}
+				}
+
+				// 检测设备出现或状态变化
+				for serial, status := range currDevices {
+					prevStatus, exists := prevDevices[serial]
+					if !exists || prevStatus != status {
+						eventCh <- DeviceEvent{
+							Present: true,
+							Serial:  serial,
+							Status:  status,
+						}
+					}
+				}
+
+				// 更新上一次的设备状态
+				prevDevices = currDevices
 			}
-			resultCh <- struct {
-				devices []Device
-				err     error
-			}{devices, nil}
-		}()
-
-		// 等待结果或上下文取消
-		select {
-		case <-ctx.Done():
-			return nil, ErrListenerClosed
-		case result := <-resultCh:
-			return result.devices, result.err
 		}
-	}
+	}()
 
-	// cancel函数：安全关闭连接
+	// 创建取消函数
 	cancelFn := func() error {
 		var closeErr error
 		closeOnce.Do(func() {
@@ -318,5 +328,5 @@ func (c Client) Listen() (next func() ([]Device, error), cancel func() error, er
 		return closeErr
 	}
 
-	return nextFn, cancelFn, nil
+	return eventCh, cancelFn, nil
 }
