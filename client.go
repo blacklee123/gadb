@@ -1,9 +1,12 @@
 package gadb
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const AdbServerPort = 5037
@@ -216,4 +219,104 @@ func (c Client) executeCommand(command string, onlyVerifyResponse ...bool) (resp
 		return "", err
 	}
 	return
+}
+
+// 添加错误定义
+var ErrListenerClosed = errors.New("listener closed")
+
+func (c Client) Listen() (next func() ([]Device, error), cancel func() error, err error) {
+	tp, err := c.createTransport()
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if err := tp.Send("host:track-devices"); err != nil {
+		_ = tp.Close()
+		return nil, nil, err
+	}
+
+	if err := tp.VerifyResponse(); err != nil {
+		_ = tp.Close()
+		return nil, nil, err
+	}
+
+	// 使用context处理取消
+	ctx, cancelCtx := context.WithCancel(context.Background())
+	var closeOnce sync.Once
+
+	// next函数：支持上下文取消的阻塞读取
+	nextFn := func() ([]Device, error) {
+		// 创建响应通道
+		resultCh := make(chan struct {
+			devices []Device
+			err     error
+		}, 1)
+
+		// 在goroutine中执行阻塞读取
+		go func() {
+			resp, err := tp.UnpackString()
+			if err != nil {
+				resultCh <- struct {
+					devices []Device
+					err     error
+				}{nil, err}
+				return
+			}
+
+			// 解析设备列表
+			lines := strings.Split(resp, "\n")
+			devices := make([]Device, 0, len(lines))
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+
+				fields := strings.Fields(line)
+				if len(fields) < 4 || fields[0] == "" {
+					debugLog(fmt.Sprintf("listen: can't parse '%s'", line))
+					continue
+				}
+
+				// 解析设备属性
+				attrs := make(map[string]string)
+				for _, attr := range fields[2:] {
+					parts := strings.SplitN(attr, ":", 2)
+					if len(parts) < 2 {
+						continue
+					}
+					attrs[parts[0]] = parts[1]
+				}
+				devices = append(devices, Device{
+					adbClient: c,
+					serial:    fields[0],
+					attrs:     attrs,
+				})
+			}
+			resultCh <- struct {
+				devices []Device
+				err     error
+			}{devices, nil}
+		}()
+
+		// 等待结果或上下文取消
+		select {
+		case <-ctx.Done():
+			return nil, ErrListenerClosed
+		case result := <-resultCh:
+			return result.devices, result.err
+		}
+	}
+
+	// cancel函数：安全关闭连接
+	cancelFn := func() error {
+		var closeErr error
+		closeOnce.Do(func() {
+			cancelCtx() // 取消上下文
+			closeErr = tp.Close()
+		})
+		return closeErr
+	}
+
+	return nextFn, cancelFn, nil
 }
