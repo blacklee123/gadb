@@ -330,3 +330,21 @@ func (c Client) TrackDevices() (events <-chan DeviceEvent, cancel func() error, 
 
 	return eventCh, cancelFn, nil
 }
+
+func (c Client) GetDevice(serial string) (Device, error) {
+	// 获取所有设备列表
+	devices, err := c.DeviceList()
+	if err != nil {
+		return Device{}, fmt.Errorf("failed to list devices: %w", err)
+	}
+
+	// 遍历查找匹配的设备
+	for _, device := range devices {
+		if device.Serial() == serial {
+			return device, nil
+		}
+	}
+
+	// 未找到设备时返回错误
+	return Device{}, fmt.Errorf("device not found: %s", serial)
+}

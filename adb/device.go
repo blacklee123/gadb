@@ -358,3 +358,53 @@ func (d Device) LogcatClear() error {
 	_, err := d.executeCommand("shell:logcat -c")
 	return err
 }
+
+func (d Device) GetProp(name string) string {
+	// 执行 getprop 命令获取属性值
+	output, err := d.RunShellCommand("getprop", name)
+	if err != nil {
+		// 错误时直接返回空字符串
+		return ""
+	}
+
+	// 去除输出中的空格和换行符
+	value := strings.TrimSpace(output)
+	return value
+}
+
+func (d Device) GetScreenSize() string {
+	// 执行 wm size 命令获取屏幕尺寸信息
+	output, err := d.RunShellCommand("wm", "size")
+	if err != nil {
+		return ""
+	}
+
+	// 处理输出结果
+	size := output
+	if strings.Contains(size, "Override size") {
+		// 提取覆盖尺寸部分
+		if idx := strings.Index(size, "Override size"); idx != -1 {
+			size = size[idx:]
+		}
+	} else {
+		// 提取冒号后的尺寸信息
+		if parts := strings.Split(size, ":"); len(parts) > 1 {
+			size = parts[1]
+		}
+	}
+
+	// 清理字符串
+	size = strings.TrimSpace(size)
+	size = strings.ReplaceAll(size, ":", "")
+	size = strings.ReplaceAll(size, "Override size", "")
+	size = strings.ReplaceAll(size, "\r", "")
+	size = strings.ReplaceAll(size, "\n", "")
+	size = strings.ReplaceAll(size, " ", "")
+
+	// 处理异常长度的情况
+	if len(size) > 20 {
+		return "unknown"
+	}
+
+	return size
+}
