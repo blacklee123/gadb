@@ -1,11 +1,17 @@
 package adb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -373,38 +379,121 @@ func (d Device) GetProp(name string) string {
 }
 
 func (d Device) GetScreenSize() string {
-	// 执行 wm size 命令获取屏幕尺寸信息
+	width, height, err := d.WindowSize()
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%dx%d", width, height)
+}
+
+func (d Device) WindowSize() (width, height int, err error) {
 	output, err := d.RunShellCommand("wm", "size")
 	if err != nil {
-		return ""
+		return 0, 0, err
 	}
 
 	// 处理输出结果
-	size := output
-	if strings.Contains(size, "Override size") {
-		// 提取覆盖尺寸部分
-		if idx := strings.Index(size, "Override size"); idx != -1 {
-			size = size[idx:]
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "Override size") {
+			// 提取覆盖尺寸部分
+			if idx := strings.Index(line, ":"); idx != -1 {
+				line = strings.TrimSpace(line[idx+1:])
+			}
+			line = strings.ReplaceAll(line, "Override size", "")
+		} else if strings.Contains(line, "Physical size") {
+			// 提取物理尺寸部分
+			if idx := strings.Index(line, ":"); idx != -1 {
+				line = strings.TrimSpace(line[idx+1:])
+			}
 		}
-	} else {
-		// 提取冒号后的尺寸信息
-		if parts := strings.Split(size, ":"); len(parts) > 1 {
-			size = parts[1]
+
+		// 清理字符串并解析尺寸
+		line = strings.ReplaceAll(line, " ", "")
+		parts := strings.Split(line, "x")
+		if len(parts) != 2 {
+			continue
 		}
+
+		width, err = strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		height, err = strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		return width, height, nil
 	}
 
-	// 清理字符串
-	size = strings.TrimSpace(size)
-	size = strings.ReplaceAll(size, ":", "")
-	size = strings.ReplaceAll(size, "Override size", "")
-	size = strings.ReplaceAll(size, "\r", "")
-	size = strings.ReplaceAll(size, "\n", "")
-	size = strings.ReplaceAll(size, " ", "")
+	return 0, 0, errors.New("failed to parse window size")
+}
 
-	// 处理异常长度的情况
-	if len(size) > 20 {
-		return "unknown"
+// getRealDisplayID 获取实际的显示ID
+func (d Device) getRealDisplayID(displayID int) (string, error) {
+	output, err := d.RunShellCommand("dumpsys", "SurfaceFlinger", "--display-id")
+	if err != nil {
+		return "", err
 	}
 
-	return size
+	// 使用正则表达式提取所有显示ID
+	re := regexp.MustCompile(`Display (\d+)`)
+	matches := re.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return "", errors.New("no display found")
+	}
+
+	// 检查请求的displayID是否有效
+	if displayID < 0 || displayID >= len(matches) {
+		return "", fmt.Errorf("invalid display ID: %d", displayID)
+	}
+
+	return matches[displayID][1], nil
+}
+
+// Screenshot 捕获设备屏幕截图
+// displayID: 可选参数，指定显示ID（默认为0）
+// errorOk: 可选参数，是否在错误时返回黑色图像（默认为true）
+func (d Device) Screenshot(displayIDOptional ...int) (img image.Image, err error) {
+	displayID := 0
+	if len(displayIDOptional) > 0 {
+		displayID = displayIDOptional[0]
+	}
+
+	// 构建命令参数
+	cmdArgs := []string{"screencap", "-p"}
+	if displayID != 0 {
+		realDisplayID, err := d.getRealDisplayID(displayID)
+		if err != nil {
+			return nil, err
+		}
+		cmdArgs = append(cmdArgs, "-d", realDisplayID)
+	}
+
+	// 执行截图命令
+	pngBytes, err := d.RunShellCommandWithBytes(cmdArgs[0], cmdArgs[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	// 解码PNG图像
+	img, err = png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		// 错误处理：返回黑色图像
+		width, height, _ := d.WindowSize()
+		if width == 0 || height == 0 {
+			width, height = 720, 1280 // 默认尺寸
+		}
+
+		blackImg := image.NewRGBA(image.Rect(0, 0, width, height))
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				blackImg.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		}
+		return blackImg, nil
+	}
+
+	return img, nil
 }

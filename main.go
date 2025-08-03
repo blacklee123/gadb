@@ -1,7 +1,9 @@
 package main
 
 import (
+	"image/png"
 	"log"
+	"os"
 
 	"github.com/blacklee123/go-adb/adb"
 )
@@ -47,4 +49,15 @@ func main() {
 		log.Fatal("获取设备失败:", err)
 	}
 	log.Println(device.GetProp("ro.product.name"))
+	log.Println(device.GetScreenSize())
+	log.Println(device.WindowSize())
+	img, err := device.Screenshot()
+	if err != nil {
+		// 处理错误
+	}
+
+	// 保存截图
+	file, _ := os.Create("screenshot.png")
+	png.Encode(file, img)
+	file.Close()
 }
