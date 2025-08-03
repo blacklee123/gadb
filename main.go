@@ -60,4 +60,5 @@ func main() {
 	file, _ := os.Create("screenshot.png")
 	png.Encode(file, img)
 	file.Close()
+	log.Println(device.Battery())
 }

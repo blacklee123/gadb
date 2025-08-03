@@ -3,6 +3,7 @@ package adb
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"sync"
@@ -232,7 +233,7 @@ type DeviceEvent struct {
 //   - events: 接收设备状态变化事件的通道
 //   - cancel: 调用后停止跟踪并关闭连接
 func (c Client) TrackDevices() (events <-chan DeviceEvent, cancel func() error, err error) {
-	tp, err := c.createTransport()
+	tp, err := newTransport(fmt.Sprintf("%s:%d", c.host, c.port), 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -268,6 +269,7 @@ func (c Client) TrackDevices() (events <-chan DeviceEvent, cancel func() error, 
 				// 读取设备状态更新
 				resp, err := tp.UnpackString()
 				if err != nil {
+					log.Println("读取设备状态失败:", err)
 					// 连接关闭或错误，退出goroutine
 					return
 				}

@@ -497,3 +497,87 @@ func (d Device) Screenshot(displayIDOptional ...int) (img image.Image, err error
 
 	return img, nil
 }
+
+// Battery 返回电池信息映射
+func (d Device) Battery() (map[string]string, error) {
+	output, err := d.RunShellCommand("dumpsys", "battery")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get battery info: %w", err)
+	}
+
+	return parseBatteryOutput(output), nil
+}
+
+// parseBatteryOutput 解析 dumpsys battery 的输出
+func parseBatteryOutput(output string) map[string]string {
+	result := make(map[string]string)
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		result[key] = value
+	}
+
+	// 添加标准化的状态描述
+	if status, ok := result["status"]; ok {
+		result["status_description"] = batteryStatusDescription(status)
+	}
+
+	if health, ok := result["health"]; ok {
+		result["health_description"] = batteryHealthDescription(health)
+	}
+
+	return result
+}
+
+// 电池状态描述
+func batteryStatusDescription(status string) string {
+	switch status {
+	case "1":
+		return "unknown"
+	case "2":
+		return "charging"
+	case "3":
+		return "discharging"
+	case "4":
+		return "not charging"
+	case "5":
+		return "full"
+	default:
+		return "undefined"
+	}
+}
+
+// 电池健康描述
+func batteryHealthDescription(health string) string {
+	switch health {
+	case "1":
+		return "unknown"
+	case "2":
+		return "good"
+	case "3":
+		return "overheat"
+	case "4":
+		return "dead"
+	case "5":
+		return "over voltage"
+	case "6":
+		return "unspecified failure"
+	case "7":
+		return "cold"
+	default:
+		return "undefined"
+	}
+}
