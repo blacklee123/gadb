@@ -1,4 +1,4 @@
-package gadb
+package adb
 
 import (
 	"testing"
