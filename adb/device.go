@@ -1,11 +1,17 @@
-package gadb
+package adb
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -357,4 +363,221 @@ func (d Device) Logcat2File(file string, exitChan chan bool) error {
 func (d Device) LogcatClear() error {
 	_, err := d.executeCommand("shell:logcat -c")
 	return err
+}
+
+func (d Device) GetProp(name string) string {
+	// 执行 getprop 命令获取属性值
+	output, err := d.RunShellCommand("getprop", name)
+	if err != nil {
+		// 错误时直接返回空字符串
+		return ""
+	}
+
+	// 去除输出中的空格和换行符
+	value := strings.TrimSpace(output)
+	return value
+}
+
+func (d Device) GetScreenSize() string {
+	width, height, err := d.WindowSize()
+	if err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%dx%d", width, height)
+}
+
+func (d Device) WindowSize() (width, height int, err error) {
+	output, err := d.RunShellCommand("wm", "size")
+	if err != nil {
+		return 0, 0, err
+	}
+
+	// 处理输出结果
+	lines := strings.Split(output, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "Override size") {
+			// 提取覆盖尺寸部分
+			if idx := strings.Index(line, ":"); idx != -1 {
+				line = strings.TrimSpace(line[idx+1:])
+			}
+			line = strings.ReplaceAll(line, "Override size", "")
+		} else if strings.Contains(line, "Physical size") {
+			// 提取物理尺寸部分
+			if idx := strings.Index(line, ":"); idx != -1 {
+				line = strings.TrimSpace(line[idx+1:])
+			}
+		}
+
+		// 清理字符串并解析尺寸
+		line = strings.ReplaceAll(line, " ", "")
+		parts := strings.Split(line, "x")
+		if len(parts) != 2 {
+			continue
+		}
+
+		width, err = strconv.Atoi(parts[0])
+		if err != nil {
+			continue
+		}
+		height, err = strconv.Atoi(parts[1])
+		if err != nil {
+			continue
+		}
+		return width, height, nil
+	}
+
+	return 0, 0, errors.New("failed to parse window size")
+}
+
+// getRealDisplayID 获取实际的显示ID
+func (d Device) getRealDisplayID(displayID int) (string, error) {
+	output, err := d.RunShellCommand("dumpsys", "SurfaceFlinger", "--display-id")
+	if err != nil {
+		return "", err
+	}
+
+	// 使用正则表达式提取所有显示ID
+	re := regexp.MustCompile(`Display (\d+)`)
+	matches := re.FindAllStringSubmatch(output, -1)
+	if len(matches) == 0 {
+		return "", errors.New("no display found")
+	}
+
+	// 检查请求的displayID是否有效
+	if displayID < 0 || displayID >= len(matches) {
+		return "", fmt.Errorf("invalid display ID: %d", displayID)
+	}
+
+	return matches[displayID][1], nil
+}
+
+// Screenshot 捕获设备屏幕截图
+// displayID: 可选参数，指定显示ID（默认为0）
+// errorOk: 可选参数，是否在错误时返回黑色图像（默认为true）
+func (d Device) Screenshot(displayIDOptional ...int) (img image.Image, err error) {
+	displayID := 0
+	if len(displayIDOptional) > 0 {
+		displayID = displayIDOptional[0]
+	}
+
+	// 构建命令参数
+	cmdArgs := []string{"screencap", "-p"}
+	if displayID != 0 {
+		realDisplayID, err := d.getRealDisplayID(displayID)
+		if err != nil {
+			return nil, err
+		}
+		cmdArgs = append(cmdArgs, "-d", realDisplayID)
+	}
+
+	// 执行截图命令
+	pngBytes, err := d.RunShellCommandWithBytes(cmdArgs[0], cmdArgs[1:]...)
+	if err != nil {
+		return nil, err
+	}
+
+	// 解码PNG图像
+	img, err = png.Decode(bytes.NewReader(pngBytes))
+	if err != nil {
+		// 错误处理：返回黑色图像
+		width, height, _ := d.WindowSize()
+		if width == 0 || height == 0 {
+			width, height = 720, 1280 // 默认尺寸
+		}
+
+		blackImg := image.NewRGBA(image.Rect(0, 0, width, height))
+		for y := 0; y < height; y++ {
+			for x := 0; x < width; x++ {
+				blackImg.Set(x, y, color.RGBA{0, 0, 0, 255})
+			}
+		}
+		return blackImg, nil
+	}
+
+	return img, nil
+}
+
+// Battery 返回电池信息映射
+func (d Device) Battery() (map[string]string, error) {
+	output, err := d.RunShellCommand("dumpsys", "battery")
+	if err != nil {
+		return nil, fmt.Errorf("failed to get battery info: %w", err)
+	}
+
+	return parseBatteryOutput(output), nil
+}
+
+// parseBatteryOutput 解析 dumpsys battery 的输出
+func parseBatteryOutput(output string) map[string]string {
+	result := make(map[string]string)
+	lines := strings.Split(output, "\n")
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || !strings.Contains(line, ":") {
+			continue
+		}
+
+		parts := strings.SplitN(line, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
+
+		result[key] = value
+	}
+
+	// 添加标准化的状态描述
+	if status, ok := result["status"]; ok {
+		result["status_description"] = batteryStatusDescription(status)
+	}
+
+	if health, ok := result["health"]; ok {
+		result["health_description"] = batteryHealthDescription(health)
+	}
+
+	return result
+}
+
+// 电池状态描述
+func batteryStatusDescription(status string) string {
+	switch status {
+	case "1":
+		return "unknown"
+	case "2":
+		return "charging"
+	case "3":
+		return "discharging"
+	case "4":
+		return "not charging"
+	case "5":
+		return "full"
+	default:
+		return "undefined"
+	}
+}
+
+// 电池健康描述
+func batteryHealthDescription(health string) string {
+	switch health {
+	case "1":
+		return "unknown"
+	case "2":
+		return "good"
+	case "3":
+		return "overheat"
+	case "4":
+		return "dead"
+	case "5":
+		return "over voltage"
+	case "6":
+		return "unspecified failure"
+	case "7":
+		return "cold"
+	default:
+		return "undefined"
+	}
 }

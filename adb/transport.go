@@ -1,4 +1,4 @@
-package gadb
+package adb
 
 import (
 	"errors"
@@ -97,7 +97,10 @@ func (t transport) ReadStringN(size int) (s string, err error) {
 }
 
 func (t transport) ReadBytesN(size int) (raw []byte, err error) {
-	_ = t.sock.SetReadDeadline(time.Now().Add(t.readTimeout))
+	// 只有超时时间 >0 时才设置截止时间
+	if t.readTimeout > 0 {
+		_ = t.sock.SetReadDeadline(time.Now().Add(t.readTimeout))
+	}
 	return _readN(t.sock, size)
 }
 
